@@ -192,6 +192,97 @@
       font: 700 24px/1 'Georgia', serif; color: #fff;
     }
     .result-label { font: 400 11px/1 'Georgia', serif; color: #b8a888; text-transform: uppercase; letter-spacing: .08em; }
+
+    /* ─── ANTI-SELECTION: NO TEXT/SCREEN HIGHLIGHT ON HOLD ─── */
+    *, *::before, *::after {
+      -webkit-touch-callout: none;
+      -webkit-user-select:   none;
+      -moz-user-select:      none;
+      user-select:           none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* ─── MOBILE: PORTRAIT LOCK OVERLAY ─── */
+    #portrait-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(10,5,1,.94);
+      backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+      flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+      z-index: 500; text-align: center;
+    }
+    @media (orientation: portrait) { #portrait-overlay { display: flex; } }
+    #portrait-icon { font-size: 56px; animation: rotate-hint 2.4s ease-in-out infinite; }
+    @keyframes rotate-hint {
+      0%,25%  { transform: rotate(0deg); }
+      55%,85% { transform: rotate(90deg); }
+      100%    { transform: rotate(90deg); }
+    }
+    #portrait-msg { font: 400 18px/1.6 'Georgia', serif; color: #f0ddb8; padding: 0 30px; }
+
+    /* ─── MOBILE: PEEK OVERLAY ─── */
+    #peek-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.52);
+      align-items: center; justify-content: center;
+      z-index: 400; pointer-events: none;
+    }
+    #peek-overlay.show { display: flex; }
+    #peek-card-face {
+      background: #FEFCF8; border: 4px solid #1e1e1e;
+      border-radius: 18px; padding: 28px 34px;
+      max-width: 72vw; min-width: 46vw;
+      text-align: center;
+      box-shadow: 0 12px 40px rgba(0,0,0,.65);
+      animation: peek-pop .14s ease-out;
+    }
+    #peek-text { font: 600 5.8vw/1.45 'Georgia', serif; color: #1a1008; }
+    @keyframes peek-pop {
+      from { transform: scale(0.88); opacity: 0.3; }
+      to   { transform: scale(1);    opacity: 1;   }
+    }
+
+    /* ─── MOBILE LANDSCAPE: LAYOUT OVERRIDES ─── */
+    @media (orientation: landscape) and (max-height: 430px) {
+      /* Start screen: scrollable + compressed to fit small landscape height */
+      #start-screen { align-items: flex-start; overflow-y: auto; }
+      #start-card {
+        margin: auto;
+        padding: 16px 28px 20px;
+        border-radius: 20px;
+      }
+      #lang-select-wrap  { margin-bottom: 10px; }
+      #lang-select-label { font-size: 13px; margin-bottom: 8px; }
+      .lang-btn          { padding: 7px 18px; font-size: 14px; }
+      #start-card h1     { font-size: 22px; margin-bottom: 6px; }
+      #start-card .sub   { font-size: 12px; margin-bottom: 10px; }
+      #start-card .rule  { margin: 0 auto 10px; }
+      #start-card p      { font-size: 12px; line-height: 1.35; margin-bottom: 4px; }
+      #btn-start         { margin-top: 14px; padding: 12px 38px; font-size: 16px; }
+
+      /* Timer → top-left */
+      #timer-display {
+        top: 6px; left: 8px; transform: none;
+        font-size: 19px; padding: 5px 14px; border-radius: 16px;
+      }
+      /* Step panel → top-right compact dialog (no longer overlaps cards) */
+      #step-panel {
+        top: 6px; left: auto; right: 8px; transform: none;
+        max-width: 210px; width: auto; text-align: left;
+        background: rgba(18,10,3,.88);
+        border: 1px solid rgba(200,160,80,.28);
+        border-radius: 14px;
+        padding: 8px 12px 9px;
+        max-height: 112px; overflow: hidden;
+      }
+      #step-label { font-size: 9px; letter-spacing: .10em; margin-bottom: 4px; }
+      #step-instructions {
+        font-size: 10px; line-height: 1.35;
+        padding: 0; background: none; border: none; border-radius: 0;
+      }
+      /* Counter and confirm button → compact */
+      #sel-counter { bottom: 8px; font-size: 12px; padding: 7px 18px; border-radius: 16px; }
+      #btn-confirm { bottom: 8px; right: 10px; padding: 10px 20px; font-size: 13px; border-radius: 26px; }
+    }
   </style>
 </head>
 <body>
@@ -236,6 +327,17 @@
         <button class="btn-sec" onclick="location.reload()">Try the activity again</button>
       </div>
     </div>
+  </div>
+
+  <!-- Portrait lock overlay (mobile only) -->
+  <div id="portrait-overlay">
+    <div id="portrait-icon">📱</div>
+    <div id="portrait-msg">Please rotate your device<br>to landscape to play</div>
+  </div>
+
+  <!-- Tap-and-hold peek card (mobile only) -->
+  <div id="peek-overlay">
+    <div id="peek-card-face"><div id="peek-text"></div></div>
   </div>
 
   <script type="importmap">
@@ -1000,6 +1102,36 @@
     let draggedCard = null;
     let isDragging  = false;
 
+    // ── Mobile peek ──────────────────────────────────────────────
+    const isMobile       = navigator.maxTouchPoints > 0;
+    const peekOverlayEl  = document.getElementById('peek-overlay');
+    const peekTextEl     = document.getElementById('peek-text');
+    let   peekTimeout    = null;
+    let   peekOriginPos  = null;   // {x,y} screen coords at pointerdown
+    let   revealTapCard  = null;   // card to flip on pointerup (mobile reveal/done phase)
+    const PEEK_DELAY_MS   = 420;
+    const PEEK_MOVE_LIMIT = 14;    // pixels
+
+    function showPeek(card) {
+      peekOriginPos = null;   // clear so subsequent moves don't cancel the visible peek
+      const h = HERRMANN[card.userData.colour];
+      if (card.userData.isFlipped && h) {
+        peekTextEl.innerHTML =
+          `<span style="color:${h.hex};font-size:1.5em;font-weight:700">${h.letter}</span><br>` +
+          (lang === 'ja' ? h.nameJa : h.name);
+      } else {
+        const txt = (lang === 'ja' ? card.userData.ja : card.userData.en) || card.userData.en;
+        peekTextEl.innerHTML = txt.replace(/\n/g, '<br>');
+      }
+      peekOverlayEl.classList.add('show');
+    }
+
+    function hidePeek() {
+      peekOverlayEl.classList.remove('show');
+      if (peekTimeout) { clearTimeout(peekTimeout); peekTimeout = null; }
+      peekOriginPos = null;
+    }
+
     function updatePointer(event) {
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
@@ -1007,15 +1139,26 @@
     }
 
     function onPointerDown(event) {
-      // ── Reveal phase: tap flips / unflips any card ──
+      // ── Reveal / Done phase ──
       if (gameState === GS.REVEAL || gameState === GS.DONE) {
         updatePointer(event);
         raycaster.setFromCamera(pointer, camera);
         const hits = raycaster.intersectObjects(allCards, false);
         if (!hits.length) return;
         const card = hits[0].object;
-        if (!card.userData.flipping) {
-          if (card.userData.isFlipped) { unflipCard(card); } else { flipCard(card); }
+        if (isMobile) {
+          // Mobile: defer flip to pointerUp; long-hold shows peek instead
+          revealTapCard = card;
+          peekOriginPos = { x: event.clientX, y: event.clientY };
+          peekTimeout = setTimeout(() => {
+            peekTimeout = null;
+            revealTapCard = null;   // cancel deferred flip — peek takes over
+            showPeek(card);
+          }, PEEK_DELAY_MS);
+        } else {
+          if (!card.userData.flipping) {
+            if (card.userData.isFlipped) { unflipCard(card); } else { flipCard(card); }
+          }
         }
         return;
       }
@@ -1029,6 +1172,16 @@
       if (!hit) return;
 
       const card = hit.object;
+
+      if (isMobile) {
+        // Start peek timer for reading card text while playing
+        peekOriginPos = { x: event.clientX, y: event.clientY };
+        peekTimeout = setTimeout(() => {
+          peekTimeout = null;
+          showPeek(card);
+        }, PEEK_DELAY_MS);
+      }
+
       const now  = performance.now();
 
       // Double-tap detection
@@ -1055,6 +1208,16 @@
     }
 
     function onPointerMove(event) {
+      // Cancel peek if pointer moved too far from its origin
+      if (isMobile && peekOriginPos) {
+        const dx = event.clientX - peekOriginPos.x;
+        const dy = event.clientY - peekOriginPos.y;
+        if (Math.sqrt(dx * dx + dy * dy) > PEEK_MOVE_LIMIT) {
+          hidePeek();
+          revealTapCard = null;   // also cancel any deferred reveal flip
+        }
+      }
+
       updatePointer(event);
       raycaster.setFromCamera(pointer, camera);
 
@@ -1075,6 +1238,33 @@
     }
 
     function onPointerUp() {
+      if (isMobile) {
+        const wasShowing = peekOverlayEl.classList.contains('show');
+        hidePeek();
+
+        // Deferred flip for reveal / done phase (quick tap without peek)
+        if (!wasShowing && revealTapCard) {
+          const card = revealTapCard;
+          revealTapCard = null;
+          if (!card.userData.flipping) {
+            if (card.userData.isFlipped) { unflipCard(card); } else { flipCard(card); }
+          }
+          return;
+        }
+        revealTapCard = null;
+
+        if (wasShowing) {
+          // Peek was visible — settle any lifted card back and skip drag-placement
+          if (isDragging && draggedCard) {
+            const c = draggedCard;
+            draggedCard = null; isDragging = false;
+            renderer.domElement.style.cursor = 'default';
+            animateCardTo(c, c.position.x, CARD_Y, c.position.z, c.rotation.y);
+          }
+          return;
+        }
+      }
+
       if (!isDragging || !draggedCard) return;
 
       const card = draggedCard;
