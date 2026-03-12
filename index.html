@@ -25,6 +25,13 @@
       max-width: 690px; width: 90%;
       text-align: center; color: #f0ddb8;
       box-shadow: 0 24px 72px rgba(0,0,0,0.75);
+      position: relative;
+    }
+    #vibecoded {
+      position: absolute; top: 14px; left: 20px;
+      font: 400 10px/1 'Georgia', serif;
+      color: rgba(200,160,80,.40);
+      letter-spacing: .04em;
     }
     #start-card h1    { font: 700 42px/1.25 'Georgia', serif; color: #f2c96a; margin-bottom: 12px; }
     #start-card .sub  { font: 400 18px/1 'Georgia', serif; color: #9a8060; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 42px; }
@@ -289,6 +296,7 @@
 
   <div id="start-screen">
     <div id="start-card">
+      <div id="vibecoded">&ldquo;Vibecoded&rdquo; by Marc (yu.tanaka)</div>
       <div id="lang-select-wrap">
         <div id="lang-select-label">Language / 言語</div>
         <div id="lang-select">
@@ -1102,34 +1110,25 @@
     let draggedCard = null;
     let isDragging  = false;
 
-    // ── Mobile peek ──────────────────────────────────────────────
-    const isMobile       = navigator.maxTouchPoints > 0;
-    const peekOverlayEl  = document.getElementById('peek-overlay');
-    const peekTextEl     = document.getElementById('peek-text');
-    let   peekTimeout    = null;
-    let   peekOriginPos  = null;   // {x,y} screen coords at pointerdown
-    let   revealTapCard  = null;   // card to flip on pointerup (mobile reveal/done phase)
-    const PEEK_DELAY_MS   = 420;
-    const PEEK_MOVE_LIMIT = 14;    // pixels
+    // ── Peek overlay (tap-to-zoom, works on both mobile and desktop) ──
+    const peekOverlayEl = document.getElementById('peek-overlay');
+    const peekTextEl    = document.getElementById('peek-text');
+    let   peekCard      = null;   // card currently shown in peek overlay
+    let   dragStartX    = 0;      // pointer position when drag began
+    let   dragStartY    = 0;
+    let   dragMoved     = false;  // true once pointer moves > DRAG_THRESHOLD
+    const DRAG_THRESHOLD = 8;     // px — below = tap, above = drag
 
     function showPeek(card) {
-      peekOriginPos = null;   // clear so subsequent moves don't cancel the visible peek
-      const h = HERRMANN[card.userData.colour];
-      if (card.userData.isFlipped && h) {
-        peekTextEl.innerHTML =
-          `<span style="color:${h.hex};font-size:1.5em;font-weight:700">${h.letter}</span><br>` +
-          (lang === 'ja' ? h.nameJa : h.name);
-      } else {
-        const txt = (lang === 'ja' ? card.userData.ja : card.userData.en) || card.userData.en;
-        peekTextEl.innerHTML = txt.replace(/\n/g, '<br>');
-      }
+      const txt = (lang === 'ja' ? card.userData.ja : card.userData.en) || card.userData.en;
+      peekTextEl.innerHTML = txt.replace(/\n/g, '<br>');
+      peekCard = card;
       peekOverlayEl.classList.add('show');
     }
 
     function hidePeek() {
       peekOverlayEl.classList.remove('show');
-      if (peekTimeout) { clearTimeout(peekTimeout); peekTimeout = null; }
-      peekOriginPos = null;
+      peekCard = null;
     }
 
     function updatePointer(event) {
@@ -1139,26 +1138,15 @@
     }
 
     function onPointerDown(event) {
-      // ── Reveal / Done phase ──
+      // ── Reveal / Done phase: tap immediately flips / unflips ──
       if (gameState === GS.REVEAL || gameState === GS.DONE) {
         updatePointer(event);
         raycaster.setFromCamera(pointer, camera);
         const hits = raycaster.intersectObjects(allCards, false);
         if (!hits.length) return;
         const card = hits[0].object;
-        if (isMobile) {
-          // Mobile: defer flip to pointerUp; long-hold shows peek instead
-          revealTapCard = card;
-          peekOriginPos = { x: event.clientX, y: event.clientY };
-          peekTimeout = setTimeout(() => {
-            peekTimeout = null;
-            revealTapCard = null;   // cancel deferred flip — peek takes over
-            showPeek(card);
-          }, PEEK_DELAY_MS);
-        } else {
-          if (!card.userData.flipping) {
-            if (card.userData.isFlipped) { unflipCard(card); } else { flipCard(card); }
-          }
+        if (!card.userData.flipping) {
+          if (card.userData.isFlipped) { unflipCard(card); } else { flipCard(card); }
         }
         return;
       }
@@ -1169,22 +1157,17 @@
 
       const hits = raycaster.intersectObjects(allCards, false);
       const hit  = hits.find(h => !h.object.userData.isDiscarded);
-      if (!hit) return;
+
+      // Tap on empty space: close peek
+      if (!hit) { if (peekCard) hidePeek(); return; }
+
+      // Any new tap closes existing peek
+      if (peekCard) hidePeek();
 
       const card = hit.object;
-
-      if (isMobile) {
-        // Start peek timer for reading card text while playing
-        peekOriginPos = { x: event.clientX, y: event.clientY };
-        peekTimeout = setTimeout(() => {
-          peekTimeout = null;
-          showPeek(card);
-        }, PEEK_DELAY_MS);
-      }
-
       const now  = performance.now();
 
-      // Double-tap detection
+      // Double-tap detection: select / deselect
       if (lastTapCard === card && (now - lastTapTime) < DOUBLE_TAP_MS) {
         lastTapCard = null; lastTapTime = 0;
         if (draggedCard === card) { draggedCard = null; isDragging = false; renderer.domElement.style.cursor = 'grab'; }
@@ -1194,6 +1177,11 @@
       }
       lastTapCard = card;
       lastTapTime = now;
+
+      // Track start position for tap-vs-drag detection
+      dragStartX = event.clientX;
+      dragStartY = event.clientY;
+      dragMoved  = false;
 
       draggedCard = card;
       isDragging  = true;
@@ -1208,14 +1196,11 @@
     }
 
     function onPointerMove(event) {
-      // Cancel peek if pointer moved too far from its origin
-      if (isMobile && peekOriginPos) {
-        const dx = event.clientX - peekOriginPos.x;
-        const dy = event.clientY - peekOriginPos.y;
-        if (Math.sqrt(dx * dx + dy * dy) > PEEK_MOVE_LIMIT) {
-          hidePeek();
-          revealTapCard = null;   // also cancel any deferred reveal flip
-        }
+      // Mark as dragged once pointer travels past the threshold
+      if (isDragging && draggedCard && !dragMoved) {
+        const dx = event.clientX - dragStartX;
+        const dy = event.clientY - dragStartY;
+        if (Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) dragMoved = true;
       }
 
       updatePointer(event);
@@ -1238,39 +1223,29 @@
     }
 
     function onPointerUp() {
-      if (isMobile) {
-        const wasShowing = peekOverlayEl.classList.contains('show');
-        hidePeek();
-
-        // Deferred flip for reveal / done phase (quick tap without peek)
-        if (!wasShowing && revealTapCard) {
-          const card = revealTapCard;
-          revealTapCard = null;
-          if (!card.userData.flipping) {
-            if (card.userData.isFlipped) { unflipCard(card); } else { flipCard(card); }
-          }
-          return;
-        }
-        revealTapCard = null;
-
-        if (wasShowing) {
-          // Peek was visible — settle any lifted card back and skip drag-placement
-          if (isDragging && draggedCard) {
-            const c = draggedCard;
-            draggedCard = null; isDragging = false;
-            renderer.domElement.style.cursor = 'default';
-            animateCardTo(c, c.position.x, CARD_Y, c.position.z, c.rotation.y);
-          }
-          return;
-        }
-      }
-
       if (!isDragging || !draggedCard) return;
 
       const card = draggedCard;
       draggedCard = null;
       isDragging  = false;
       renderer.domElement.style.cursor = 'default';
+
+      // ── Tap (no drag) in playing phase → toggle peek overlay ──
+      if (!dragMoved && gameState === GS.PLAYING) {
+        if (peekCard === card) {
+          hidePeek();
+        } else {
+          showPeek(card);
+        }
+        // Settle card back to where it was (slot or table)
+        const inZone = card.position.z > (ZONE_Z - ZONE_HALF_D);
+        if (inZone) {
+          animateCardTo(card, SLOT_X[findNearestSlotIdx(card.position.x)], CARD_Y, ZONE_Z, 0);
+        } else {
+          animateCardTo(card, card.position.x, CARD_Y, card.position.z, card.rotation.y);
+        }
+        return;
+      }
 
       const inZone = card.position.z > (ZONE_Z - ZONE_HALF_D);
 
@@ -1478,6 +1453,7 @@
     function refreshCardTextures() {
       for (const card of allCards) {
         const text = lang === 'ja' ? card.userData.ja : card.userData.en;
+        card.material[2].map.dispose();
         card.material[2].map = createCardFrontTexture(text);
         card.material[2].needsUpdate = true;
       }
